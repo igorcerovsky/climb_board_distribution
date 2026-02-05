@@ -44,16 +44,21 @@ def farthest_point_sampling(points, N, seed=42):
 
 # --- 3. Sample Multiple Layers of Points ---
 # Define how many points to add per iteration (edit this list)
-N_list = [32, 32]  # e.g., first iteration 32, second iteration 32
+N_list = [32, 32, 32, 32]  # e.g., first iteration 32, second iteration 32
 # Define colors per iteration (must be at least as long as N_list)
-layer_colors = ["red", "green", "orange", "blue", "purple"]
+layer_names = ["Jug", "Bid Edge Rotated", "Pinch Rotated", "Pinch Near Vertical"]  # names for legend
+draw_triang = [False, False, True, True]  # whether to draw Delaunay triangulation for each layer
+rot_limits = [(-45, 45), (-30, 30), (45, 135), (70, 110)]  # rotation limits (degrees) for each layer
+layer_colors = ["red", "green", "blue", "purple", "orange"]
+rng = np.random.default_rng(42)
 
-def sample_additional(points, free_idx, existing_selected_idx, N):
+def sample_additional(points, free_idx, existing_selected_idx, N, rng,
+                      respect_existing=True, top_k=5):
     if N <= 0 or free_idx.size == 0:
         return np.array([], dtype=int)
 
     free_points = points[free_idx]
-    if existing_selected_idx.size > 0:
+    if respect_existing and existing_selected_idx.size > 0:
         selected_points = points[existing_selected_idx]
         dist_to_selected = np.min(
             np.linalg.norm(free_points[:, None, :] - selected_points[None, :, :], axis=2),
@@ -66,7 +71,13 @@ def sample_additional(points, free_idx, existing_selected_idx, N):
     available = np.ones(len(free_idx), dtype=bool)
 
     for _ in range(min(N, len(free_idx))):
-        idx_local = np.argmax(np.where(available, dist_to_selected, -1.0))
+        candidates = np.where(available)[0]
+        if candidates.size == 0:
+            break
+        cand_scores = dist_to_selected[candidates]
+        k = min(top_k, candidates.size)
+        top_idx = np.argpartition(cand_scores, -k)[-k:]
+        idx_local = candidates[rng.choice(top_idx)]
         if dist_to_selected[idx_local] < 0:
             break
         chosen.append(free_idx[idx_local])
@@ -83,8 +94,18 @@ selected_layers = []
 free_idx = np.arange(len(grid_points))
 selected_all = np.array([], dtype=int)
 
-for n in N_list:
-    new_sel = sample_additional(grid_points, free_idx, selected_all, n)
+for layer_i, n in enumerate(N_list):
+    # For later layers, prioritize uniformity within remaining free points
+    respect_existing = (layer_i == 0)
+    new_sel = sample_additional(
+        grid_points,
+        free_idx,
+        selected_all,
+        n,
+        rng,
+        respect_existing=respect_existing,
+        top_k=8
+    )
     selected_layers.append(new_sel)
     if new_sel.size > 0:
         selected_all = np.concatenate([selected_all, new_sel])
@@ -93,7 +114,6 @@ for n in N_list:
 # --- 4. Rotation Assignment (optimize differences on triangulation graph) ---
 rot_min_deg = -45
 rot_max_deg = 45
-rng = np.random.default_rng(42)
 
 def angular_diff(a, b):
     """Smallest absolute angular difference (radians) in [-pi, pi]."""
@@ -132,7 +152,7 @@ def optimize_rotations(neighbors, rot_min_deg, rot_max_deg, rng,
     rot_min = np.deg2rad(rot_min_deg)
     rot_max = np.deg2rad(rot_max_deg)
     n = len(neighbors)
-    angles = rng.uniform(rot_min, rot_max, size=n)
+    angles = initialize_spread_angles(rng, rot_min, rot_max, n)
 
     for _ in range(iterations):
         order = rng.permutation(n)
@@ -151,6 +171,28 @@ def optimize_rotations(neighbors, rot_min_deg, rot_max_deg, rng,
                     best_score = score
                     best_angle = a
             angles[i] = best_angle
+    return angles
+
+def initialize_spread_angles(rng, rot_min, rot_max, n):
+    if n == 0:
+        angles = np.array([])
+    else:
+        # Farthest-point sampling over 1D angle candidates to get well-spread initial angles
+        num_candidates = max(1000, n * 5)
+        candidates = np.linspace(rot_min, rot_max, num_candidates)
+        selected_idxs = []
+        first_idx = int(rng.integers(num_candidates))
+        selected_idxs.append(first_idx)
+
+        dist = np.full(num_candidates, np.inf)
+        for _ in range(1, n):
+            last = candidates[selected_idxs[-1]]
+            d = angular_diff(candidates, last)
+            dist = np.minimum(dist, d)
+            next_idx = int(np.argmax(dist))
+            selected_idxs.append(next_idx)
+
+        angles = candidates[np.array(selected_idxs)]
     return angles
 
 def euclidean_mst(points):
@@ -178,19 +220,46 @@ def euclidean_mst(points):
 
 mst_edges = euclidean_mst(selected_points) if len(selected_points) > 1 else []
 
-# --- 6. Optimize rotations based on triangulation neighbors ---
-neighbors = build_neighbors_from_tri(tri, len(selected_points))
-rot_rad = optimize_rotations(
-    neighbors,
-    rot_min_deg,
-    rot_max_deg,
-    rng,
-    iterations=60,
-    candidates_per_point=50
-) if len(selected_points) > 0 else np.array([])
+# --- 6. Optimize rotations based on triangulation neighbors (per-layer) ---
+rot_rad = np.full(len(selected_all), np.nan)
+
+for layer_i, layer in enumerate(selected_layers):
+    if layer.size == 0:
+        continue
+    
+    # Get rotation limits for this layer
+    if layer_i < len(rot_limits):
+        rot_min, rot_max = rot_limits[layer_i]
+    else:
+        rot_min, rot_max = rot_min_deg, rot_max_deg
+    
+    # Build neighbors graph for this layer only
+    if layer.size > 1:
+        layer_points = grid_points[layer]
+        try:
+            layer_tri = mtri.Triangulation(layer_points[:, 0], layer_points[:, 1])
+            layer_neighbors = build_neighbors_from_tri(layer_tri, len(layer))
+        except:
+            layer_neighbors = [set() for _ in range(len(layer))]
+    else:
+        layer_neighbors = [set() for _ in range(len(layer))]
+    
+    # Optimize rotations for this layer
+    layer_angles = optimize_rotations(
+        layer_neighbors,
+        rot_min,
+        rot_max,
+        rng,
+        iterations=120,
+        candidates_per_point=100
+    ) if layer.size > 0 else np.array([])
+    
+    # Map back to global indices
+    global_indices = np.where(np.isin(selected_all, layer))[0]
+    rot_rad[global_indices] = layer_angles
 
 # Small line segment direction for visualization (both sides of point)
-seg_len = distance_m * 0.35
+seg_len = distance_m * 0.8
 u = np.cos(rot_rad) * seg_len
 v = np.sin(rot_rad) * seg_len
 
@@ -202,17 +271,19 @@ v_map[selected_all] = v
 
 plt.figure(figsize=(8, 7))
 plt.scatter(grid_points[free_idx, 0], grid_points[free_idx, 1],
-            color="lightgrey", s=20, label="Free grid points")
+            color="lightgrey", s=2, label="Free grid points")
 for i, layer in enumerate(selected_layers):
     if layer.size == 0:
         continue
     color = layer_colors[i % len(layer_colors)]
+    layer_name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
     plt.scatter(grid_points[layer, 0], grid_points[layer, 1],
-                color=color, s=40, label=f"Selected layer {i+1} (N={len(layer)})")
+                color=color, s=10, label=f"{layer_name} (N={len(layer)})")
 for i, layer in enumerate(selected_layers):
     if layer.size == 0:
         continue
     color = layer_colors[i % len(layer_colors)]
+    layer_name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
     layer_points = grid_points[layer]
     plt.quiver(
         layer_points[:, 0] - u_map[layer],
@@ -221,20 +292,30 @@ for i, layer in enumerate(selected_layers):
         angles="xy",
         scale_units="xy",
         scale=1,
-        width=0.004,
+        width=0.001,
         color=color,
         alpha=0.85,
-        label=f"Rotation {i+1}"
+        label=f"{layer_name} Rotation"
     )
 
 if show_graph and mtri is not None:
     for i, layer in enumerate(selected_layers):
         if layer.size < 3:
             continue
+        if i < len(draw_triang) and not draw_triang[i]:
+            continue
         color = layer_colors[i % len(layer_colors)]
+        layer_name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
         layer_points = grid_points[layer]
         layer_tri = mtri.Triangulation(layer_points[:, 0], layer_points[:, 1])
-        plt.triplot(layer_tri, color=color, linewidth=0.9, alpha=0.7, label=f"Delaunay {i+1}")
+        # Draw triangulation with transparency
+        for tri_idx in layer_tri.triangles:
+            triangle = layer_points[tri_idx]
+            triangle_closed = np.vstack([triangle, triangle[0]])
+            plt.plot(triangle_closed[:, 0], triangle_closed[:, 1], 
+                    color=color, linewidth=0.9, alpha=0.1)
+        # Add label once per layer
+        plt.plot([], [], color=color, linewidth=0.9, label=f"{layer_name} Delaunay")
 
 if show_mst:
     for i, j in mst_edges:
@@ -246,6 +327,6 @@ plt.gca().set_aspect("equal")
 plt.title("Farthest-Point Sampling on Grid with Rotations, Delaunay, and MST")
 plt.xlabel("X (m)")
 plt.ylabel("Y (m)")
-plt.legend()
-plt.tight_layout()
+plt.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0)
+plt.tight_layout(rect=[0, 0, 0.82, 1])
 plt.show()
