@@ -9,11 +9,15 @@ from pathlib import Path
 def load_config(config_file=None):
     """Load configuration from JSON file, with defaults."""
     defaults = {
-        "layer_names": ["Jug", "Bid Edge Rotated", "Pinch Rotated", "Sloper", "Layer 5", "Layer 6", "Layer 7", "Layer 8", "Layer 9"],
-        "rot_limits": [[0, 350], [45, 135], [45, 135], [0, 180], [90, 90], [90, 90], [90, 90], [90, 90], [90, 90]],
-        "N_list": [32, 32, 44, 32, 32, 32, 32, 32, 32],
-        "draw_triang": [False, False, True, False, False, False, False, False, False],
-        "layer_colors": ["red", "green", "blue", "purple", "orange", "cyan", "magenta", "brown", "pink"]
+        "layers": [
+            {"name": "Jug", "N": 44, "draw_triang": False, "color": "red", "rot_limits": [0, 350], "visible": True},
+            {"name": "Pinch", "N": 44, "draw_triang": False, "color": "blue", "rot_limits": [45, 135], "visible": True},
+            {"name": "Sloper (flat)", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [0, 350], "visible": True},
+            {"name": "Volume", "N": 44, "draw_triang": False, "color": "cyan", "rot_limits": [20, 160], "visible": True},
+            {"name": "Bid Edge", "N": 44, "draw_triang": False, "color": "green", "rot_limits": [0, 175], "visible": True},
+            {"name": "Medium Edge", "N": 44, "draw_triang": False, "color": "orange", "rot_limits": [0, 175], "visible": True},
+            {"name": "Hold", "N": 32, "draw_triang": False, "color": "magenta", "rot_limits": None, "visible": True},
+        ]
     }
     
     if config_file and Path(config_file).exists():
@@ -31,7 +35,7 @@ def load_config(config_file=None):
     return defaults
 
 # --- 1. Generate Original Grid Points ---
-np.random.seed(42)
+np.random.seed(1)
 
 # Global grid points (precomputed)
 LEN_X_MM = 3600
@@ -168,7 +172,10 @@ def initialize_spread_angles(rng, rot_min, rot_max, n):
             # Use regular 1D distance for linear sampling (not circular/angular)
             d = np.abs(candidates - last)
             dist = np.minimum(dist, d)
-            next_idx = int(np.argmax(dist))
+            # Randomly select from all candidates with max distance to avoid bias
+            max_dist = dist.max()
+            candidates_max = np.where(dist == max_dist)[0]
+            next_idx = rng.choice(candidates_max)
             selected_idxs.append(next_idx)
 
         angles = candidates[np.array(selected_idxs)]
@@ -209,11 +216,15 @@ def main():
     
     # Load configuration
     config = load_config(args.config)
-    layer_names = config["layer_names"]
-    N_list = config["N_list"]
-    draw_triang = list(config["draw_triang"])
-    rot_limits = config["rot_limits"]
-    layer_colors = config["layer_colors"]
+    layers_config = config["layers"]
+    
+    # Extract properties from layers config
+    layer_names = [layer["name"] for layer in layers_config]
+    N_list = [layer["N"] for layer in layers_config]
+    draw_triang = [layer["draw_triang"] for layer in layers_config]
+    rot_limits = [layer["rot_limits"] for layer in layers_config]
+    layer_colors = [layer["color"] for layer in layers_config]
+    initial_visible = [layer.get("visible", True) for layer in layers_config]
     
     # Initialize RNG
     rng = np.random.default_rng(42)
@@ -256,10 +267,8 @@ def main():
         if layer.size == 0:
             continue
         
-        if layer_i < len(rot_limits):
+        if layer_i < len(rot_limits) and rot_limits[layer_i] is not None:
             rot_min, rot_max = rot_limits[layer_i]
-        else:
-            rot_min, rot_max = -45, 45
         
         if layer.size > 1:
             layer_points = GRID_POINTS[layer]
@@ -273,7 +282,7 @@ def main():
         
         layer_angles = optimize_rotations(
             layer_neighbors, rot_min, rot_max, rng,
-            iterations=120, candidates_per_point=100
+            iterations=120, candidates_per_point=160
         ) if layer.size > 0 else np.array([])
         
         global_indices = np.where(np.isin(selected_all, layer))[0]
@@ -294,8 +303,8 @@ def main():
     show_graph = True
     show_mst = False
     
-    # Track which layers show colored symbols (default: all True)
-    show_symbols = {i: True for i in range(len(selected_layers))}
+    # Track which layers show colored symbols (initialized from config)
+    show_symbols = {i: initial_visible[i] for i in range(len(selected_layers))}
     
     # Keyboard mapping for qwertyuiop row (10 keys for up to 10 layers)
     symbol_keys = {
@@ -350,8 +359,8 @@ def main():
         for i, layer in enumerate(selected_layers):
             if layer.size == 0:
                 continue
-            # Skip rotation arrows if limits are [90, 90]
-            if i < len(rot_limits) and rot_limits[i] == [90, 90]:
+            # Skip rotation arrows if limits are None (fixed rotation)
+            if i < len(rot_limits) and rot_limits[i] is None:
                 continue
             # Skip rotation arrows if layer symbols are hidden
             if not show_symbols.get(i, True):
@@ -359,7 +368,7 @@ def main():
             color = layer_colors[i % len(layer_colors)]
             layer_name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
             layer_points = GRID_POINTS[layer]
-            scale_factor = 0.2 if i < len(rot_limits) and rot_limits[i] == [90, 90] else 0.6
+            scale_factor = 0.2 if i < len(rot_limits) and rot_limits[i] is None else 0.6
             plt.quiver(
                 layer_points[:, 0] - scale_factor * u_map[layer],
                 layer_points[:, 1] - scale_factor * v_map[layer],

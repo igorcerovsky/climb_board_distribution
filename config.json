@@ -1,7 +1,7 @@
 {
-  "layer_names": ["Jug", "Bid Edge Rotated", "Pinch Rotated"],
-  "N_list": [32, 32, 44],
-  "draw_triang": [false, false, true],
-  "rot_limits": [[0, 350], [45, 135], [45, 135]],
-  "layer_colors": ["red", "green", "blue", "purple", "orange"]
+  "layers": [
+    {"name": "Jug", "N": 32, "draw_triang": false, "color": "red", "rot_limits": [0, 350]},
+    {"name": "Bid Edge Rotated", "N": 32, "draw_triang": false, "color": "green", "rot_limits": [45, 135]},
+    {"name": "Pinch Rotated", "N": 44, "draw_triang": true, "color": "blue", "rot_limits": [45, 135]}
+  ]
 }
