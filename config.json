@@ -1,0 +1,7 @@
+{
+  "layer_names": ["Jug", "Bid Edge Rotated", "Pinch Rotated"],
+  "N_list": [32, 32, 44],
+  "draw_triang": [false, false, true],
+  "rot_limits": [[0, 350], [45, 135], [45, 135]],
+  "layer_colors": ["red", "green", "blue", "purple", "orange"]
+}
