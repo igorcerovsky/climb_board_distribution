@@ -44,11 +44,11 @@ def farthest_point_sampling(points, N, seed=42):
 
 # --- 3. Sample Multiple Layers of Points ---
 # Define how many points to add per iteration (edit this list)
-N_list = [32, 32, 32, 32]  # e.g., first iteration 32, second iteration 32
+N_list = [32, 32, 44]  # e.g., first iteration 32, second iteration 32
 # Define colors per iteration (must be at least as long as N_list)
-layer_names = ["Jug", "Bid Edge Rotated", "Pinch Rotated", "Pinch Near Vertical"]  # names for legend
-draw_triang = [False, False, True, True]  # whether to draw Delaunay triangulation for each layer
-rot_limits = [(-45, 45), (-30, 30), (45, 135), (70, 110)]  # rotation limits (degrees) for each layer
+layer_names = ["Jug", "Bid Edge Rotated", "Pinch Rotated"]  # names for legend
+draw_triang = [False, False, True]  # whether to draw Delaunay triangulation for each layer
+rot_limits = [(0, 350), (45, 135), (45, 135)]  # rotation limits (degrees) for each layer
 layer_colors = ["red", "green", "blue", "purple", "orange"]
 rng = np.random.default_rng(42)
 
@@ -112,8 +112,6 @@ for layer_i, n in enumerate(N_list):
         free_idx = np.setdiff1d(free_idx, new_sel, assume_unique=False)
 
 # --- 4. Rotation Assignment (optimize differences on triangulation graph) ---
-rot_min_deg = -45
-rot_max_deg = 45
 
 def angular_diff(a, b):
     """Smallest absolute angular difference (radians) in [-pi, pi]."""
@@ -148,7 +146,7 @@ def build_neighbors_from_tri(tri, n):
     return neighbors
 
 def optimize_rotations(neighbors, rot_min_deg, rot_max_deg, rng,
-                       iterations=60, candidates_per_point=50):
+                       iterations=60, candidates_per_point=80):
     rot_min = np.deg2rad(rot_min_deg)
     rot_max = np.deg2rad(rot_max_deg)
     n = len(neighbors)
@@ -177,7 +175,7 @@ def initialize_spread_angles(rng, rot_min, rot_max, n):
     if n == 0:
         angles = np.array([])
     else:
-        # Farthest-point sampling over 1D angle candidates to get well-spread initial angles
+        # Farthest-point sampling on linear range to get well-spread initial angles
         num_candidates = max(1000, n * 5)
         candidates = np.linspace(rot_min, rot_max, num_candidates)
         selected_idxs = []
@@ -187,7 +185,8 @@ def initialize_spread_angles(rng, rot_min, rot_max, n):
         dist = np.full(num_candidates, np.inf)
         for _ in range(1, n):
             last = candidates[selected_idxs[-1]]
-            d = angular_diff(candidates, last)
+            # Use regular 1D distance for linear sampling (not circular/angular)
+            d = np.abs(candidates - last)
             dist = np.minimum(dist, d)
             next_idx = int(np.argmax(dist))
             selected_idxs.append(next_idx)
@@ -230,8 +229,6 @@ for layer_i, layer in enumerate(selected_layers):
     # Get rotation limits for this layer
     if layer_i < len(rot_limits):
         rot_min, rot_max = rot_limits[layer_i]
-    else:
-        rot_min, rot_max = rot_min_deg, rot_max_deg
     
     # Build neighbors graph for this layer only
     if layer.size > 1:
@@ -292,7 +289,7 @@ for i, layer in enumerate(selected_layers):
         angles="xy",
         scale_units="xy",
         scale=1,
-        width=0.001,
+        width=0.005,
         color=color,
         alpha=0.85,
         label=f"{layer_name} Rotation"
