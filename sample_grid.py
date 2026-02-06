@@ -12,10 +12,9 @@ def load_config(config_file=None):
         "layers": [
             {"name": "Jug", "N": 44, "draw_triang": False, "color": "red", "rot_limits": [0, 350], "visible": True},
             {"name": "Pinch", "N": 44, "draw_triang": False, "color": "blue", "rot_limits": [45, 135], "visible": True},
-            {"name": "Sloper (flat)", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [0, 350], "visible": True},
+            {"name": "Sloper (flat)", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [50, 120], "visible": True},
             {"name": "Volume", "N": 44, "draw_triang": False, "color": "cyan", "rot_limits": [20, 160], "visible": True},
-            {"name": "Bid Edge", "N": 44, "draw_triang": False, "color": "green", "rot_limits": [0, 175], "visible": True},
-            {"name": "Medium Edge", "N": 44, "draw_triang": False, "color": "orange", "rot_limits": [0, 175], "visible": True},
+            {"name": "Edge", "N": 80, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
             {"name": "Hold", "N": 32, "draw_triang": False, "color": "magenta", "rot_limits": None, "visible": True},
         ]
     }
@@ -282,7 +281,7 @@ def main():
         
         layer_angles = optimize_rotations(
             layer_neighbors, rot_min, rot_max, rng,
-            iterations=120, candidates_per_point=160
+            iterations=60, candidates_per_point=120
         ) if layer.size > 0 else np.array([])
         
         global_indices = np.where(np.isin(selected_all, layer))[0]
