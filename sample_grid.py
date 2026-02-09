@@ -1,5 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
+import tty
+import termios
+import select
 import json
 import argparse
 import sys
@@ -15,8 +19,7 @@ def load_config(config_file=None):
             {"name": "Sloper (flat)", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [50, 120], "visible": True},
             {"name": "Volume", "N": 44, "draw_triang": False, "color": "indigo", "rot_limits": [20, 160], "visible": True},
             {"name": "Edge", "N": 44, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
-            {"name": "Hold", "N": 44, "draw_triang": False, "color": "magenta", "rot_limits": None, "visible": True},
-            {"name": "Rest", "N": 8, "draw_triang": False, "color": "olive", "rot_limits": None, "visible": True},
+            {"name": "Hold", "N": 52, "draw_triang": False, "color": "magenta", "rot_limits": [20, 160], "visible": True},
         ]
     }
     
@@ -33,6 +36,10 @@ def load_config(config_file=None):
             print("Using default configuration")
     
     return defaults
+
+# Disable matplotlib's default quit keybinds (e.g., 'q') before any figures are created
+mpl.rcParams['keymap.quit'] = []
+
 
 # --- 1. Generate Original Grid Points ---
 np.random.seed(1)
@@ -75,25 +82,68 @@ def farthest_point_sampling(points, N, seed=42):
 
 # --- 3. Sample Multiple Layers of Points ---
 
-def sample_additional(points, free_idx, existing_selected_idx, N, rng,
-                      respect_existing=True, top_k=5):
+def _layer_score_from_dist(dist_mat, idxs, penalty_weight=0.0, min_per=2):
+    if idxs.size < 2:
+        return 0.0
+    d = dist_mat[np.ix_(idxs, idxs)].copy()
+    np.fill_diagonal(d, np.inf)
+    nn = np.min(d, axis=1)
+    base = float(nn.min() + 0.2 * nn.mean())
+    if penalty_weight > 0.0:
+        base -= penalty_weight * rowcol_penalty(idxs, min_per=min_per)
+    return base
+
+def _global_score(dist_mat, layers, cross_weight=0.2, penalty_weight=0.0, min_per=2):
+    if not layers:
+        return 0.0
+    scores = []
+    for idxs in layers:
+        scores.append(_layer_score_from_dist(dist_mat, idxs, penalty_weight=penalty_weight, min_per=min_per))
+    intra = float(np.mean(scores))
+    # Cross-layer repulsion: encourage layers to avoid each other's points
+    if len(layers) > 1:
+        cross_mins = []
+        for i in range(len(layers)):
+            for j in range(i + 1, len(layers)):
+                a = layers[i]
+                b = layers[j]
+                if a.size == 0 or b.size == 0:
+                    continue
+                d = dist_mat[np.ix_(a, b)]
+                cross_mins.append(np.min(d))
+        if cross_mins:
+            inter = float(np.mean(cross_mins))
+        else:
+            inter = 0.0
+    else:
+        inter = 0.0
+    return intra + cross_weight * inter
+
+def _layer_score(points_or_dist, idxs, penalty_weight=0.0, min_per=2):
+    # Backward-compatible helper
+    if isinstance(points_or_dist, np.ndarray) and points_or_dist.ndim == 2:
+        return _layer_score_from_dist(points_or_dist, idxs, penalty_weight=penalty_weight, min_per=min_per)
+    dist_mat = np.linalg.norm(points_or_dist[:, None, :] - points_or_dist[None, :, :], axis=2)
+    return _layer_score_from_dist(dist_mat, idxs, penalty_weight=penalty_weight, min_per=min_per)
+
+def _greedy_farthest(points, free_idx, N, rng, top_k=8):
     if N <= 0 or free_idx.size == 0:
         return np.array([], dtype=int)
-
     free_points = points[free_idx]
-    if respect_existing and existing_selected_idx.size > 0:
-        selected_points = points[existing_selected_idx]
-        dist_to_selected = np.min(
-            np.linalg.norm(free_points[:, None, :] - selected_points[None, :, :], axis=2),
-            axis=1
-        )
-    else:
-        dist_to_selected = np.full(len(free_idx), np.inf)
-
     chosen = []
     available = np.ones(len(free_idx), dtype=bool)
+    dist_to_selected = np.full(len(free_idx), np.inf)
 
-    for _ in range(min(N, len(free_idx))):
+    # random start
+    first = rng.integers(len(free_idx))
+    chosen.append(free_idx[first])
+    available[first] = False
+    dist_to_selected = np.minimum(
+        dist_to_selected,
+        np.linalg.norm(free_points - free_points[first], axis=1)
+    )
+
+    for _ in range(1, min(N, len(free_idx))):
         candidates = np.where(available)[0]
         if candidates.size == 0:
             break
@@ -101,17 +151,377 @@ def sample_additional(points, free_idx, existing_selected_idx, N, rng,
         k = min(top_k, candidates.size)
         top_idx = np.argpartition(cand_scores, -k)[-k:]
         idx_local = candidates[rng.choice(top_idx)]
-        if dist_to_selected[idx_local] < 0:
-            break
         chosen.append(free_idx[idx_local])
         available[idx_local] = False
 
-        # Update distances using the newly chosen point
-        new_point = points[free_idx[idx_local]]
+        new_point = free_points[idx_local]
         d = np.linalg.norm(free_points - new_point, axis=1)
         dist_to_selected = np.minimum(dist_to_selected, d)
 
     return np.array(chosen, dtype=int)
+
+def _poisson_disk_select(points, free_idx, N, rng,
+                         tries=30, iters=20):
+    """Maximize minimum distance via discrete Poisson-disk selection with binary search."""
+    if N <= 0 or free_idx.size == 0:
+        return np.array([], dtype=int)
+
+    free_points = points[free_idx]
+    dist = np.linalg.norm(free_points[:, None, :] - free_points[None, :, :], axis=2)
+    max_dist = dist.max() if dist.size else 0.0
+
+    best_sel = None
+    best_r = -1.0
+
+    def attempt(r):
+        best_local = []
+        for _ in range(tries):
+            order = rng.permutation(len(free_idx))
+            blocked = np.zeros(len(free_idx), dtype=bool)
+            selected = []
+            for i in order:
+                if blocked[i]:
+                    continue
+                selected.append(i)
+                if len(selected) >= N:
+                    return True, selected
+                blocked |= (dist[i] < r)
+            if len(selected) > len(best_local):
+                best_local = selected
+        return False, best_local
+
+    lo, hi = 0.0, max_dist
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        ok, sel = attempt(mid)
+        if ok:
+            lo = mid
+            best_r = mid
+            best_sel = sel
+        else:
+            hi = mid
+
+    if best_sel is None or len(best_sel) < N:
+        # fallback to greedy farthest if binary search fails to reach N
+        return _greedy_farthest(points, free_idx, N, rng, top_k=10)
+
+    return free_idx[np.array(best_sel, dtype=int)]
+
+def _pam_select(points, free_idx, N, rng, iters=25):
+    """PAM (k-medoids) on remaining free points."""
+    if N <= 0 or free_idx.size == 0:
+        return np.array([], dtype=int)
+    free_points = points[free_idx]
+    m = len(free_idx)
+    if N >= m:
+        return free_idx.copy()
+
+    # Precompute distances
+    dist = np.linalg.norm(free_points[:, None, :] - free_points[None, :, :], axis=2)
+
+    # Initialize medoids with farthest-point greedy
+    medoids = _greedy_farthest(points, free_idx, N, rng, top_k=10)
+    medoid_idx = np.searchsorted(free_idx, medoids)
+
+    for _ in range(iters):
+        # Assign each point to nearest medoid
+        d_to_medoids = dist[:, medoid_idx]
+        assignment = np.argmin(d_to_medoids, axis=1)
+
+        new_medoids = medoid_idx.copy()
+        for k in range(N):
+            cluster = np.where(assignment == k)[0]
+            if cluster.size == 0:
+                continue
+            # Choose point minimizing sum of distances within cluster
+            sub = dist[np.ix_(cluster, cluster)]
+            costs = sub.sum(axis=1)
+            new_medoids[k] = cluster[np.argmin(costs)]
+
+        if np.array_equal(new_medoids, medoid_idx):
+            break
+        medoid_idx = new_medoids
+
+    return free_idx[medoid_idx]
+
+def rowcol_penalty(idxs, min_per=2):
+    """Soft penalty for rows/cols with fewer than min_per points."""
+    if idxs.size == 0:
+        return 0.0
+    row_counts = np.zeros(NUM_POINTS_Y, dtype=int)
+    col_counts = np.zeros(NUM_POINTS_X, dtype=int)
+    for idx in idxs:
+        r = idx // NUM_POINTS_X
+        c = idx % NUM_POINTS_X
+        row_counts[r] += 1
+        col_counts[c] += 1
+    deficit_rows = np.clip(min_per - row_counts, 0, None)
+    deficit_cols = np.clip(min_per - col_counts, 0, None)
+    return float(deficit_rows.sum() + deficit_cols.sum())
+
+def _swap_improve(points, free_idx, idxs, rng, steps=200, candidate_pool=80,
+                  penalty_weight=0.0, min_per=2):
+    if idxs.size < 2:
+        return idxs
+    current = idxs.copy()
+    free_set = set(free_idx.tolist())
+    current_set = set(current.tolist())
+    free_set -= current_set
+    free_list = np.array(list(free_set), dtype=int)
+    if free_list.size == 0:
+        return current
+
+    dist_mat = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+    best_score = _layer_score_from_dist(dist_mat, current, penalty_weight=penalty_weight, min_per=min_per)
+    for _ in range(steps):
+        # pick a point to replace
+        out_idx = rng.integers(len(current))
+        out_point = current[out_idx]
+        # sample candidates to swap in
+        k = min(candidate_pool, free_list.size)
+        cand = rng.choice(free_list, size=k, replace=False)
+        improved = False
+        for in_point in cand:
+            trial = current.copy()
+            trial[out_idx] = in_point
+            score = _layer_score_from_dist(dist_mat, trial, penalty_weight=penalty_weight, min_per=min_per)
+            if score > best_score:
+                best_score = score
+                current = trial
+                # update free_list (swap)
+                free_list = np.array([p for p in free_list if p != in_point] + [out_point], dtype=int)
+                improved = True
+                break
+        if not improved:
+            continue
+    return current
+
+def sample_layer_best(points, free_idx, N, rng,
+                      trials=12, top_k=8, swap_steps=200,
+                      use_poisson=True, use_pam=False):
+    if N <= 0 or free_idx.size == 0:
+        return np.array([], dtype=int)
+    best = None
+    best_score = -1.0
+    dist_mat = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+    for _ in range(trials):
+        if use_pam:
+            idxs = _pam_select(points, free_idx, N, rng, iters=20)
+        elif use_poisson:
+            idxs = _poisson_disk_select(points, free_idx, N, rng, tries=25, iters=18)
+        else:
+            idxs = _greedy_farthest(points, free_idx, N, rng, top_k=top_k)
+        idxs = _swap_improve(points, free_idx, idxs, rng, steps=swap_steps,
+                             penalty_weight=0.15, min_per=2)
+        score = _layer_score_from_dist(dist_mat, idxs, penalty_weight=0.15, min_per=2)
+        if score > best_score:
+            best_score = score
+            best = idxs
+    return best if best is not None else np.array([], dtype=int)
+
+def refine_layers_global(points, layers, free_idx, rng,
+                         steps=3000, candidate_pool=120, temp_start=0.5, temp_end=0.02,
+                         cross_weight=0.2, penalty_weight=0.15, min_per=2):
+    """Global refinement using simulated annealing swaps between layers and free points."""
+    if not layers:
+        return layers, free_idx
+
+    layers = [layer.copy() for layer in layers]
+    free_set = set(free_idx.tolist())
+    layer_sizes = [len(layer) for layer in layers]
+    dist_mat = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+
+    current_score = _global_score(dist_mat, layers, cross_weight=cross_weight,
+                                  penalty_weight=penalty_weight, min_per=min_per)
+    best_layers = [l.copy() for l in layers]
+    best_score = current_score
+
+    for step in range(steps):
+        t = temp_start * ((temp_end / temp_start) ** (step / max(1, steps - 1)))
+        move_type = rng.random()
+
+        # Choose swap between layers
+        if move_type < 0.5 and len(layers) > 1:
+            idxs = [i for i, s in enumerate(layer_sizes) if s > 0]
+            if len(idxs) < 2:
+                continue
+            a, b = rng.choice(idxs, size=2, replace=False)
+            la = layers[a]
+            lb = layers[b]
+            ia = rng.integers(len(la))
+            ib = rng.integers(len(lb))
+            pa = la[ia]
+            pb = lb[ib]
+
+            la_trial = la.copy()
+            lb_trial = lb.copy()
+            la_trial[ia] = pb
+            lb_trial[ib] = pa
+
+            trial_layers = layers.copy()
+            trial_layers[a] = la_trial
+            trial_layers[b] = lb_trial
+            trial_score = _global_score(dist_mat, trial_layers, cross_weight=cross_weight,
+                                        penalty_weight=penalty_weight, min_per=min_per)
+
+            delta = trial_score - current_score
+            if delta > 0 or rng.random() < np.exp(delta / max(t, 1e-6)):
+                layers = trial_layers
+                current_score = trial_score
+
+        # Swap with free points
+        else:
+            idxs = [i for i, s in enumerate(layer_sizes) if s > 0]
+            if not idxs or not free_set:
+                continue
+            a = rng.choice(idxs)
+            la = layers[a]
+            ia = rng.integers(len(la))
+            pa = la[ia]
+
+            free_list = np.array(list(free_set), dtype=int)
+            k = min(candidate_pool, free_list.size)
+            cand = rng.choice(free_list, size=k, replace=False)
+            in_point = cand[rng.integers(len(cand))]
+
+            la_trial = la.copy()
+            la_trial[ia] = in_point
+
+            trial_layers = layers.copy()
+            trial_layers[a] = la_trial
+            trial_score = _global_score(dist_mat, trial_layers, cross_weight=cross_weight,
+                                        penalty_weight=penalty_weight, min_per=min_per)
+
+            delta = trial_score - current_score
+            if delta > 0 or rng.random() < np.exp(delta / max(t, 1e-6)):
+                layers = trial_layers
+                current_score = trial_score
+                free_set.remove(in_point)
+                free_set.add(pa)
+
+        if current_score > best_score:
+            best_score = current_score
+            best_layers = [l.copy() for l in layers]
+
+    free_idx = np.array(list(free_set), dtype=int)
+    return best_layers, free_idx
+
+def refine_last_layer(points, layers, free_idx, rng,
+                      steps=4000, candidate_pool=200, preserve_other=0.85):
+    """Targeted refinement for the last layer using swaps with free points and other layers."""
+    if not layers:
+        return layers, free_idx
+    layers = [l.copy() for l in layers]
+    free_set = set(free_idx.tolist())
+    dist_mat = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+
+    last_idx = len(layers) - 1
+    last = layers[last_idx]
+    if last.size == 0:
+        return layers, free_idx
+
+    for _ in range(steps):
+        move_type = rng.random()
+
+        # Prefer swapping with free points for last layer
+        if move_type < 0.7 and free_set:
+            ia = rng.integers(len(last))
+            pa = last[ia]
+            free_list = np.array(list(free_set), dtype=int)
+            k = min(candidate_pool, free_list.size)
+            cand = rng.choice(free_list, size=k, replace=False)
+            current_score = _layer_score_from_dist(dist_mat, last)
+            best_score = current_score
+            best_in = None
+            for in_point in cand:
+                trial = last.copy()
+                trial[ia] = in_point
+                score = _layer_score_from_dist(dist_mat, trial)
+                if score > best_score:
+                    best_score = score
+                    best_in = in_point
+            if best_in is not None:
+                last[ia] = best_in
+                layers[last_idx] = last
+                free_set.remove(best_in)
+                free_set.add(pa)
+            continue
+
+        # Swap with another layer (keep other layers from degrading too much)
+        other_idx = rng.integers(len(layers) - 1)
+        other = layers[other_idx]
+        if other.size == 0:
+            continue
+        ia = rng.integers(len(last))
+        ib = rng.integers(len(other))
+        pa = last[ia]
+        pb = other[ib]
+
+        last_trial = last.copy()
+        other_trial = other.copy()
+        last_trial[ia] = pb
+        other_trial[ib] = pa
+
+        last_score = _layer_score_from_dist(dist_mat, last)
+        last_score_trial = _layer_score_from_dist(dist_mat, last_trial)
+        other_score = _layer_score_from_dist(dist_mat, other)
+        other_score_trial = _layer_score_from_dist(dist_mat, other_trial)
+
+        if last_score_trial > last_score and other_score_trial >= preserve_other * other_score:
+            layers[last_idx] = last_trial
+            layers[other_idx] = other_trial
+            last = layers[last_idx]
+
+    free_idx = np.array(list(free_set), dtype=int)
+    return layers, free_idx
+
+def ensure_layers_disjoint(layers, free_idx, rng):
+    """Ensure no point index appears in multiple layers by swapping with free points."""
+    layers = [l.copy() for l in layers]
+    free_set = set(free_idx.tolist())
+    seen = set()
+    for i in range(len(layers)):
+        layer = layers[i]
+        for j in range(len(layer)):
+            idx = layer[j]
+            if idx in seen:
+                if not free_set:
+                    continue
+                replacement = rng.choice(list(free_set))
+                free_set.remove(replacement)
+                free_set.add(idx)
+                layer[j] = replacement
+            seen.add(layer[j])
+        layers[i] = layer
+    free_idx = np.array(list(free_set), dtype=int)
+    return layers, free_idx
+
+def assign_remaining_points(points, layers, free_idx, rng,
+                            penalty_weight=0.15, min_per=2):
+    """Assign any remaining free points to layers to fully occupy the grid."""
+    if free_idx.size == 0 or not layers:
+        return layers, free_idx
+
+    layers = [l.copy() for l in layers]
+    dist_mat = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+    free = free_idx.copy()
+    rng.shuffle(free)
+
+    for p in free:
+        best_layer = None
+        best_score = -np.inf
+        for i in range(len(layers)):
+            trial = np.append(layers[i], p)
+            score = _layer_score_from_dist(dist_mat, trial,
+                                           penalty_weight=penalty_weight,
+                                           min_per=min_per)
+            if score > best_score:
+                best_score = score
+                best_layer = i
+        layers[best_layer] = np.append(layers[best_layer], p)
+
+    free_idx = np.array([], dtype=int)
+    return layers, free_idx
 
 # --- 4. Rotation Assignment (optimize differences on triangulation graph) ---
 def angular_diff(a, b):
@@ -226,6 +636,20 @@ def main():
     layer_colors = [layer["color"] for layer in layers_config]
     initial_visible = [layer.get("visible", True) for layer in layers_config]
     
+    # Adjust layer counts to fill the grid evenly (approximately)
+    total_points = len(GRID_POINTS)
+    target_sum = total_points
+    current_sum = int(np.sum(N_list))
+    if current_sum != target_sum and len(N_list) > 0:
+        diff = target_sum - current_sum
+        step = 1 if diff > 0 else -1
+        diff = abs(diff)
+        for i in range(diff):
+            N_list[i % len(N_list)] += step
+        # Prevent negative counts
+        N_list = [max(0, n) for n in N_list]
+        print(f"ℹ Adjusted layer counts to fill grid: total {sum(N_list)} (grid {total_points})")
+
     # Initialize RNG
     rng = np.random.default_rng(42)
     
@@ -241,22 +665,80 @@ def main():
         if layer_i >= len(N_list):
             break
         n = N_list[layer_i]
-        respect_existing = (layer_i == 0)
-        new_sel = sample_additional(
-            GRID_POINTS, free_idx, selected_all, n, rng,
-            respect_existing=respect_existing, top_k=8
+        # Optimize each layer for regularity on the remaining free points
+        new_sel = sample_layer_best(
+            GRID_POINTS, free_idx, n, rng,
+            trials=8, top_k=10, swap_steps=250, use_poisson=False, use_pam=True
         )
         selected_layers.append(new_sel)
         if new_sel.size > 0:
             selected_all = np.concatenate([selected_all, new_sel])
             free_idx = np.setdiff1d(free_idx, new_sel, assume_unique=False)
+
+    # Global refinement: swap points between layers to improve overall regularity
+    if len(selected_layers) > 1:
+        print("ℹ Global refinement across layers...")
+        selected_layers, free_idx = refine_layers_global(
+            GRID_POINTS, selected_layers, free_idx, rng,
+            steps=3500, candidate_pool=140, cross_weight=0.35,
+            penalty_weight=0.15, min_per=2
+        )
+        # Recompute selected_all
+        selected_all = np.concatenate(selected_layers) if selected_layers else np.array([], dtype=int)
+        print("✓ Global refinement done")
+
+    # Targeted refinement for the last layer (improve its regularity)
+    if len(selected_layers) > 0:
+        print("ℹ Targeted refinement for last layer...")
+        selected_layers, free_idx = refine_last_layer(
+            GRID_POINTS, selected_layers, free_idx, rng,
+            steps=3500, candidate_pool=160, preserve_other=0.92
+        )
+        selected_all = np.concatenate(selected_layers) if selected_layers else np.array([], dtype=int)
+        print("✓ Last layer refinement done")
+
+    # Soft row/col constraint handled via penalty in scoring (no hard enforcement)
+
+    # Ensure layers are disjoint after all refinements
+    if len(selected_layers) > 0:
+        selected_layers, free_idx = ensure_layers_disjoint(selected_layers, free_idx, rng)
+        selected_all = np.concatenate(selected_layers) if selected_layers else np.array([], dtype=int)
+
+    # Assign any remaining free points to layers to fully occupy the grid
+    if free_idx.size > 0 and len(selected_layers) > 0:
+        print("ℹ Assigning remaining free points to layers...")
+        selected_layers, free_idx = assign_remaining_points(
+            GRID_POINTS, selected_layers, free_idx, rng,
+            penalty_weight=0.15, min_per=2
+        )
+        selected_all = np.concatenate(selected_layers) if selected_layers else np.array([], dtype=int)
+        print("✓ All grid points assigned to layers")
+
+    # Final validation: all grid points should be assigned
+    if len(selected_layers) > 0:
+        assigned_all = np.concatenate(selected_layers) if selected_layers else np.array([], dtype=int)
+        assigned_set = set(assigned_all.tolist())
+        missing = len(GRID_POINTS) - len(assigned_set)
+        if missing > 0:
+            print(f"⚠ Warning: {missing} grid points still unassigned; force-assigning...")
+            free_idx = np.setdiff1d(np.arange(len(GRID_POINTS)), np.array(list(assigned_set), dtype=int), assume_unique=False)
+            # Force-assign remaining points evenly by layer size
+            free_points = free_idx.copy()
+            for i, p in enumerate(free_points):
+                layer_idx = i % len(selected_layers)
+                selected_layers[layer_idx] = np.append(selected_layers[layer_idx], p)
+            assigned_all = np.concatenate(selected_layers)
+            assigned_set = set(assigned_all.tolist())
+            selected_all = assigned_all
+        # Recompute free_idx after force-assign
+        free_idx = np.setdiff1d(np.arange(len(GRID_POINTS)), np.array(list(assigned_set), dtype=int), assume_unique=False)
     
     print(f"✓ Sampled {len(selected_layers)} layers with {len(selected_all)} total points")
     
     # Compute rotations
     print("ℹ Computing rotations...")
     selected_points = GRID_POINTS[selected_all]
-    rot_rad = np.full(len(selected_all), np.nan)
+    rot_map = np.full(len(GRID_POINTS), np.nan)
     
     try:
         import matplotlib.tri as mtri
@@ -267,6 +749,8 @@ def main():
         if layer.size == 0:
             continue
         
+        rot_min = None
+        rot_max = None
         if layer_i < len(rot_limits) and rot_limits[layer_i] is not None:
             rot_min, rot_max = rot_limits[layer_i]
         
@@ -280,14 +764,27 @@ def main():
         else:
             layer_neighbors = [set() for _ in range(len(layer))]
         
-        layer_angles = optimize_rotations(
-            layer_neighbors, rot_min, rot_max, rng,
-            iterations=60, candidates_per_point=120
-        ) if layer.size > 0 else np.array([])
-        
-        global_indices = np.where(np.isin(selected_all, layer))[0]
-        rot_rad[global_indices] = layer_angles
+        if rot_min is not None and rot_max is not None and layer.size > 0:
+            layer_angles = optimize_rotations(
+                layer_neighbors, rot_min, rot_max, rng,
+                iterations=60, candidates_per_point=120
+            )
+            rot_map[layer] = layer_angles
     
+    # Fill any missing rotations for layers with limits
+    for layer_i, layer in enumerate(selected_layers):
+        if layer.size == 0:
+            continue
+        if layer_i < len(rot_limits) and rot_limits[layer_i] is not None:
+            rot_min, rot_max = rot_limits[layer_i]
+            missing = np.isnan(rot_map[layer])
+            if np.any(missing):
+                rot_map[layer[missing]] = rng.uniform(
+                    np.deg2rad(rot_min), np.deg2rad(rot_max), size=np.sum(missing)
+                )
+    # Default any remaining NaNs to 0
+    rot_map[np.isnan(rot_map)] = 0.0
+    rot_rad = rot_map[selected_all]
     print("✓ Rotations computed")
     
     # Compute visualization
@@ -314,62 +811,57 @@ def main():
     # Reverse mapping for display
     key_labels = {v: k for k, v in symbol_keys.items()}
     
-    # Interactive loop
-    while True:
-        print("\n" + "="*60)
-        print("CONTROLS:")
-        print("  Numbers (1-N): Toggle Delaunay triangulation")
-        print("  Letters (q-p):  Toggle colored symbols (show/hide as gray cross)")
-        print("  'q':            Quit")
-        print("="*60)
-        print("TRIANGULATION LAYERS:")
-        for i in range(len(selected_layers)):
-            status = "ON " if (i < len(draw_triang) and draw_triang[i]) else "OFF"
-            name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
-            symbol_key = key_labels.get(i, '?')
-            symbol_status = "✓" if show_symbols.get(i, True) else "✗"
-            print(f"  {i+1}. {name}: Tri={status} {symbol_key}={symbol_status}")
-        print("="*60)
-        
-        # Create visualization
-        plt.figure(figsize=(8, 7))
-        
-        # Plot free points
-        plt.scatter(GRID_POINTS[free_idx, 0], GRID_POINTS[free_idx, 1],
-                    color="lightgrey", s=2, label="Free grid points")
-        
-        # Plot layers
+    # Interactive visualization using terminal key events (no Enter required)
+    print("\n" + "="*60)
+    print("CONTROLS:")
+    print("  Numbers (1-N): Toggle Delaunay triangulation")
+    print("  Letters (q-p):  Toggle colored symbols (show/hide as gray cross)")
+    print("  'x':            Quit")
+    print("="*60)
+    print("TRIANGULATION LAYERS:")
+    for i in range(len(selected_layers)):
+        status = "ON " if (i < len(draw_triang) and draw_triang[i]) else "OFF"
+        name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
+        symbol_key = key_labels.get(i, '?')
+        symbol_status = "✓" if show_symbols.get(i, True) else "✗"
+        print(f"  {i+1}. {name}: Tri={status} {symbol_key}={symbol_status}")
+    print("="*60)
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    def render():
+        ax.clear()
+
+        ax.scatter(GRID_POINTS[free_idx, 0], GRID_POINTS[free_idx, 1],
+                   color="lightgrey", s=2, label="Free grid points")
+
         for i, layer in enumerate(selected_layers):
             if layer.size == 0:
                 continue
             layer_points = GRID_POINTS[layer]
-            
+
             if show_symbols.get(i, True):
-                # Draw colored scatter points
                 color = layer_colors[i % len(layer_colors)]
                 layer_name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
-                plt.scatter(layer_points[:, 0], layer_points[:, 1],
-                            color=color, s=10, label=f"{layer_name} (N={len(layer)})")
+                ax.scatter(layer_points[:, 0], layer_points[:, 1],
+                           color=color, s=10, label=f"{layer_name} (N={len(layer)})")
             else:
-                # Draw small gray crosses instead
-                plt.scatter(layer_points[:, 0], layer_points[:, 1],
-                            marker='x', color='gray', s=30, linewidths=0.4, alpha=0.6, label=f"Layer {i+1} (hidden)")
-        
-        # Plot rotations
+                ax.scatter(layer_points[:, 0], layer_points[:, 1],
+                           marker='x', color='gray', s=30, linewidths=0.4, alpha=0.6,
+                           label=f"Layer {i+1} (hidden)")
+
         for i, layer in enumerate(selected_layers):
             if layer.size == 0:
                 continue
-            # Skip rotation arrows if limits are None (fixed rotation)
             if i < len(rot_limits) and rot_limits[i] is None:
                 continue
-            # Skip rotation arrows if layer symbols are hidden
             if not show_symbols.get(i, True):
                 continue
             color = layer_colors[i % len(layer_colors)]
             layer_name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
             layer_points = GRID_POINTS[layer]
             scale_factor = 0.2 if i < len(rot_limits) and rot_limits[i] is None else 0.6
-            plt.quiver(
+            ax.quiver(
                 layer_points[:, 0] - scale_factor * u_map[layer],
                 layer_points[:, 1] - scale_factor * v_map[layer],
                 2*scale_factor*u_map[layer], 2*scale_factor*v_map[layer],
@@ -377,8 +869,7 @@ def main():
                 width=0.003, color=color, alpha=0.85,
                 label=f"{layer_name} Rotation"
             )
-        
-        # Plot triangulations
+
         if show_graph and mtri is not None:
             for i, layer in enumerate(selected_layers):
                 if layer.size < 3:
@@ -389,62 +880,71 @@ def main():
                 layer_name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
                 layer_points = GRID_POINTS[layer]
                 layer_tri = mtri.Triangulation(layer_points[:, 0], layer_points[:, 1])
-                
+
                 for tri_idx in layer_tri.triangles:
                     triangle = layer_points[tri_idx]
                     triangle_closed = np.vstack([triangle, triangle[0]])
-                    plt.plot(triangle_closed[:, 0], triangle_closed[:, 1], 
+                    ax.plot(triangle_closed[:, 0], triangle_closed[:, 1],
                             color=color, linewidth=0.2, alpha=0.4)
-                
-                plt.plot([], [], color=color, linewidth=0.9, label=f"{layer_name} Delaunay")
-        
-        # Plot MST
+
+                ax.plot([], [], color=color, linewidth=0.9, label=f"{layer_name} Delaunay")
+
         if show_mst:
             for i, j in mst_edges:
                 xi, yi = selected_points[i]
                 xj, yj = selected_points[j]
-                plt.plot([xi, xj], [yi, yj], color="blue", linewidth=1.2, alpha=0.85, label="_nolegend_")
-        
-        plt.gca().set_aspect("equal")
-        plt.title("Farthest-Point Sampling on Grid with Rotations, Delaunay, and MST")
-        plt.xlabel("X (m)")
-        plt.ylabel("Y (m)")
-        plt.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0)
-        plt.tight_layout(rect=[0, 0, 0.82, 1])
-        plt.show(block=False)
-        
-        # Get user input
-        user_input = input(f"\nEnter layer number to toggle triangulation (1-{len(selected_layers)}),\n"
-                          f"letter (q-p) to toggle symbol visibility, or 'quit' to exit: ").strip().lower()
-        
-        if user_input in ['quit', 'exit', 'x']:
+                ax.plot([xi, xj], [yi, yj], color="blue", linewidth=1.2, alpha=0.85, label="_nolegend_")
+
+        ax.set_aspect("equal")
+        ax.set_title("Farthest-Point Sampling on Grid with Rotations, Delaunay, and MST")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0)
+        fig.tight_layout(rect=[0, 0, 0.82, 1])
+        fig.canvas.draw_idle()
+
+    def getch_nonblocking(timeout=0.1):
+        """Read a single keypress from terminal without Enter. Returns None if no key."""
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+            if rlist:
+                ch = sys.stdin.read(1)
+                return ch
+            return None
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    render()
+    plt.show(block=False)
+
+    while plt.fignum_exists(fig.number):
+        key = getch_nonblocking(0.1)
+        if not key:
+            plt.pause(0.01)
+            continue
+        key = key.lower()
+        if key == "x":
             print("✓ Exiting.")
-            plt.close('all')
+            plt.close(fig)
             break
-        
-        # Check if input is a symbol key (q-p for layers 0-9)
-        if user_input in symbol_keys:
-            layer_idx = symbol_keys[user_input]
+        if key in symbol_keys:
+            layer_idx = symbol_keys[key]
             if layer_idx < len(selected_layers):
                 show_symbols[layer_idx] = not show_symbols[layer_idx]
                 status = "shown" if show_symbols[layer_idx] else "hidden"
                 print(f"✓ Layer {layer_idx + 1} symbols {status}")
-                plt.close('all')
-            else:
-                print(f"✗ No layer assigned to key '{user_input}'")
+            render()
             continue
-        
-        # Check if input is a triangulation toggle (numeric)
-        try:
-            layer_idx = int(user_input) - 1
+        if key.isdigit():
+            layer_idx = int(key) - 1
             if 0 <= layer_idx < len(selected_layers):
                 draw_triang[layer_idx] = not draw_triang[layer_idx]
-                print(f"✓ Toggled triangulation for layer {user_input}")
-                plt.close('all')
-            else:
-                print(f"✗ Invalid layer number. Please enter 1-{len(selected_layers)}")
-        except ValueError:
-            print("✗ Invalid input. Please enter a number (1-N), letter (q-p), or 'quit'.")
+                print(f"✓ Toggled triangulation for layer {key}")
+                render()
+            continue
 
 if __name__ == "__main__":
     main()
