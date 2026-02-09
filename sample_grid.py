@@ -13,9 +13,10 @@ def load_config(config_file=None):
             {"name": "Jug", "N": 44, "draw_triang": False, "color": "red", "rot_limits": [0, 350], "visible": True},
             {"name": "Pinch", "N": 44, "draw_triang": False, "color": "blue", "rot_limits": [45, 135], "visible": True},
             {"name": "Sloper (flat)", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [50, 120], "visible": True},
-            {"name": "Volume", "N": 44, "draw_triang": False, "color": "cyan", "rot_limits": [20, 160], "visible": True},
-            {"name": "Edge", "N": 80, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
-            {"name": "Hold", "N": 32, "draw_triang": False, "color": "magenta", "rot_limits": None, "visible": True},
+            {"name": "Volume", "N": 44, "draw_triang": False, "color": "indigo", "rot_limits": [20, 160], "visible": True},
+            {"name": "Edge", "N": 44, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
+            {"name": "Hold", "N": 44, "draw_triang": False, "color": "magenta", "rot_limits": None, "visible": True},
+            {"name": "Rest", "N": 8, "draw_triang": False, "color": "olive", "rot_limits": None, "visible": True},
         ]
     }
     
@@ -37,7 +38,7 @@ def load_config(config_file=None):
 np.random.seed(1)
 
 # Global grid points (precomputed)
-LEN_X_MM = 3600
+LEN_X_MM = 3400
 LEN_Y_MM = 3200
 DISTANCE_MM = 200
 NUM_POINTS_X = int(LEN_X_MM / DISTANCE_MM)
