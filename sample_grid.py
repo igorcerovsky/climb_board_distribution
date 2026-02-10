@@ -8,6 +8,7 @@ import json
 import argparse
 import sys
 from pathlib import Path
+from point_distribution_optimizer import optimize_point_distribution
 
 # --- Configuration Loading ---
 def load_config(config_file=None):
@@ -15,11 +16,14 @@ def load_config(config_file=None):
     defaults = {
         "layers": [
             {"name": "Jug", "N": 44, "draw_triang": False, "color": "red", "rot_limits": [0, 350], "visible": True},
-            {"name": "Pinch", "N": 44, "draw_triang": False, "color": "blue", "rot_limits": [45, 135], "visible": True},
+            {"name": "Pinch", "N": 24, "draw_triang": False, "color": "blue", "rot_limits": [45, 135], "visible": True},
+            {"name": "PinchBig", "N": 24, "draw_triang": False, "color": "orange", "rot_limits": [45, 135], "visible": True},
             {"name": "Sloper (flat)", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [50, 120], "visible": True},
             {"name": "Volume", "N": 44, "draw_triang": False, "color": "indigo", "rot_limits": [20, 160], "visible": True},
-            {"name": "Edge", "N": 44, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
-            {"name": "Hold", "N": 52, "draw_triang": False, "color": "magenta", "rot_limits": [20, 160], "visible": True},
+            {"name": "Edge", "N": 22, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
+            {"name": "EdgeBig", "N": 22, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
+            {"name": "Hold", "N": 24, "draw_triang": False, "color": "magenta", "rot_limits": [20, 160], "visible": True},
+            {"name": "Last", "N": 24, "draw_triang": False, "color": "yellow", "rot_limits": [20, 160], "visible": True},
         ]
     }
     
@@ -82,6 +86,13 @@ def farthest_point_sampling(points, N, seed=42):
 
 # --- 3. Sample Multiple Layers of Points ---
 
+def _feasible_min_per(n, desired=2):
+    if n <= 0:
+        return 0
+    max_per_row = n // max(NUM_POINTS_Y, 1)
+    max_per_col = n // max(NUM_POINTS_X, 1)
+    return min(desired, max_per_row, max_per_col)
+
 def _layer_score_from_dist(dist_mat, idxs, penalty_weight=0.0, min_per=2):
     if idxs.size < 2:
         return 0.0
@@ -89,7 +100,7 @@ def _layer_score_from_dist(dist_mat, idxs, penalty_weight=0.0, min_per=2):
     np.fill_diagonal(d, np.inf)
     nn = np.min(d, axis=1)
     base = float(nn.min() + 0.2 * nn.mean())
-    if penalty_weight > 0.0:
+    if penalty_weight > 0.0 and min_per > 0:
         base -= penalty_weight * rowcol_penalty(idxs, min_per=min_per)
     return base
 
@@ -98,7 +109,8 @@ def _global_score(dist_mat, layers, cross_weight=0.2, penalty_weight=0.0, min_pe
         return 0.0
     scores = []
     for idxs in layers:
-        scores.append(_layer_score_from_dist(dist_mat, idxs, penalty_weight=penalty_weight, min_per=min_per))
+        layer_min = _feasible_min_per(len(idxs), desired=min_per)
+        scores.append(_layer_score_from_dist(dist_mat, idxs, penalty_weight=penalty_weight, min_per=layer_min))
     intra = float(np.mean(scores))
     # Cross-layer repulsion: encourage layers to avoid each other's points
     if len(layers) > 1:
@@ -122,9 +134,11 @@ def _global_score(dist_mat, layers, cross_weight=0.2, penalty_weight=0.0, min_pe
 def _layer_score(points_or_dist, idxs, penalty_weight=0.0, min_per=2):
     # Backward-compatible helper
     if isinstance(points_or_dist, np.ndarray) and points_or_dist.ndim == 2:
-        return _layer_score_from_dist(points_or_dist, idxs, penalty_weight=penalty_weight, min_per=min_per)
+        layer_min = _feasible_min_per(len(idxs), desired=min_per)
+        return _layer_score_from_dist(points_or_dist, idxs, penalty_weight=penalty_weight, min_per=layer_min)
     dist_mat = np.linalg.norm(points_or_dist[:, None, :] - points_or_dist[None, :, :], axis=2)
-    return _layer_score_from_dist(dist_mat, idxs, penalty_weight=penalty_weight, min_per=min_per)
+    layer_min = _feasible_min_per(len(idxs), desired=min_per)
+    return _layer_score_from_dist(dist_mat, idxs, penalty_weight=penalty_weight, min_per=layer_min)
 
 def _greedy_farthest(points, free_idx, N, rng, top_k=8):
     if N <= 0 or free_idx.size == 0:
@@ -311,13 +325,105 @@ def sample_layer_best(points, free_idx, N, rng,
             idxs = _poisson_disk_select(points, free_idx, N, rng, tries=25, iters=18)
         else:
             idxs = _greedy_farthest(points, free_idx, N, rng, top_k=top_k)
+        layer_min = _feasible_min_per(len(idxs), desired=2)
         idxs = _swap_improve(points, free_idx, idxs, rng, steps=swap_steps,
-                             penalty_weight=0.15, min_per=2)
-        score = _layer_score_from_dist(dist_mat, idxs, penalty_weight=0.15, min_per=2)
+                             penalty_weight=0.15, min_per=layer_min)
+        score = _layer_score_from_dist(dist_mat, idxs, penalty_weight=0.15, min_per=layer_min)
         if score > best_score:
             best_score = score
             best = idxs
-    return best if best is not None else np.array([], dtype=int)
+    if best is None or best.size == 0:
+        # Fallback: random sample to avoid empty layer
+        if free_idx.size >= N:
+            return rng.choice(free_idx, size=N, replace=False)
+        return free_idx.copy()
+    if best.size < N and free_idx.size >= N:
+        # Ensure full layer size if possible
+        return rng.choice(free_idx, size=N, replace=False)
+    return best
+
+def sample_layers_global_greedy(points, N_list, rng):
+    """Global greedy sampler that allocates points to all layers simultaneously."""
+    num_layers = len(N_list)
+    total_needed = int(np.sum(N_list))
+    if total_needed == 0:
+        return [np.array([], dtype=int) for _ in range(num_layers)], np.arange(len(points))
+
+    total_points = len(points)
+    if total_needed > total_points:
+        raise ValueError("Requested more points than available in grid.")
+
+    # Precompute distance matrix (small grid sizes make this ok)
+    dist_mat = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+
+    # Expected spacing per layer for normalization
+    x_min, x_max = points[:, 0].min(), points[:, 0].max()
+    y_min, y_max = points[:, 1].min(), points[:, 1].max()
+    area = (x_max - x_min) * (y_max - y_min)
+    target_spacing = [
+        np.sqrt(area / max(n, 1)) if n > 0 else 1.0
+        for n in N_list
+    ]
+
+    available_mask = np.ones(total_points, dtype=bool)
+    selected_layers = [np.array([], dtype=int) for _ in range(num_layers)]
+    remaining = N_list.copy()
+
+    # Seed each non-empty layer with one random point to avoid degeneracy
+    for i in range(num_layers):
+        if remaining[i] > 0:
+            candidates = np.where(available_mask)[0]
+            if candidates.size == 0:
+                break
+            pick = rng.choice(candidates)
+            selected_layers[i] = np.array([pick], dtype=int)
+            available_mask[pick] = False
+            remaining[i] -= 1
+
+    # Initialize min-distance arrays for each layer
+    min_dist = []
+    for i in range(num_layers):
+        if selected_layers[i].size > 0:
+            md = dist_mat[:, selected_layers[i]].min(axis=1)
+        else:
+            md = np.full(total_points, np.inf)
+        min_dist.append(md)
+
+    while any(r > 0 for r in remaining):
+        best_layer = None
+        best_point = None
+        best_score = -np.inf
+
+        for i in range(num_layers):
+            if remaining[i] <= 0:
+                continue
+            candidates = np.where(available_mask)[0]
+            if candidates.size == 0:
+                break
+            # pick farthest point for this layer
+            md = min_dist[i][candidates]
+            idx_local = np.argmax(md)
+            point_idx = candidates[idx_local]
+            score = md[idx_local] / max(target_spacing[i], 1e-6)
+            if score > best_score:
+                best_score = score
+                best_layer = i
+                best_point = point_idx
+
+        if best_layer is None or best_point is None:
+            break
+
+        # assign
+        selected_layers[best_layer] = np.append(selected_layers[best_layer], best_point)
+        available_mask[best_point] = False
+        remaining[best_layer] -= 1
+
+        # update min_dist for all layers
+        for i in range(num_layers):
+            min_dist[i] = np.minimum(min_dist[i], dist_mat[:, best_point])
+
+    free_idx = np.where(available_mask)[0]
+    return selected_layers, free_idx
 
 def refine_layers_global(points, layers, free_idx, rng,
                          steps=3000, candidate_pool=120, temp_start=0.5, temp_end=0.02,
@@ -635,6 +741,17 @@ def main():
     rot_limits = [layer["rot_limits"] for layer in layers_config]
     layer_colors = [layer["color"] for layer in layers_config]
     initial_visible = [layer.get("visible", True) for layer in layers_config]
+    use_optimizer = config.get("use_optimizer", True)
+    optimizer_params = config.get(
+        "optimizer_params",
+        {
+            "max_iterations": 25,
+            "point_variance_tolerance": 0.0,
+            "improvement_threshold": 0.001,
+            "patience": 5
+        }
+    )
+    use_custom_refinement = config.get("use_custom_refinement", False)
     
     # Adjust layer counts to fill the grid evenly (approximately)
     total_points = len(GRID_POINTS)
@@ -660,42 +777,57 @@ def main():
     selected_all = np.array([], dtype=int)
     
     num_layers = len(layer_names)
-    
-    for layer_i in range(num_layers):
+    # Prioritize smaller layers first to improve their regularity
+    layer_order = list(range(num_layers))
+    layer_order.sort(key=lambda i: N_list[i])
+    temp_layers = [None] * num_layers
+    for layer_i in layer_order:
         if layer_i >= len(N_list):
-            break
+            continue
         n = N_list[layer_i]
         # Optimize each layer for regularity on the remaining free points
         new_sel = sample_layer_best(
             GRID_POINTS, free_idx, n, rng,
             trials=8, top_k=10, swap_steps=250, use_poisson=False, use_pam=True
         )
-        selected_layers.append(new_sel)
+        temp_layers[layer_i] = new_sel
         if new_sel.size > 0:
             selected_all = np.concatenate([selected_all, new_sel])
             free_idx = np.setdiff1d(free_idx, new_sel, assume_unique=False)
+    selected_layers = temp_layers
 
-    # Global refinement: swap points between layers to improve overall regularity
-    if len(selected_layers) > 1:
-        print("ℹ Global refinement across layers...")
-        selected_layers, free_idx = refine_layers_global(
-            GRID_POINTS, selected_layers, free_idx, rng,
-            steps=3500, candidate_pool=140, cross_weight=0.35,
-            penalty_weight=0.15, min_per=2
-        )
-        # Recompute selected_all
-        selected_all = np.concatenate(selected_layers) if selected_layers else np.array([], dtype=int)
-        print("✓ Global refinement done")
-
-    # Targeted refinement for the last layer (improve its regularity)
-    if len(selected_layers) > 0:
-        print("ℹ Targeted refinement for last layer...")
-        selected_layers, free_idx = refine_last_layer(
-            GRID_POINTS, selected_layers, free_idx, rng,
-            steps=3500, candidate_pool=160, preserve_other=0.92
+    # Optimizer from demo (layer-to-layer distribution improvement)
+    if use_optimizer and len(selected_layers) > 1:
+        print("ℹ Running point distribution optimizer (demo strategy)...")
+        selected_layers = optimize_point_distribution(
+            GRID_POINTS, selected_layers, **optimizer_params
         )
         selected_all = np.concatenate(selected_layers) if selected_layers else np.array([], dtype=int)
-        print("✓ Last layer refinement done")
+        free_idx = np.setdiff1d(np.arange(len(GRID_POINTS)), selected_all, assume_unique=False)
+        print("✓ Optimizer done")
+
+    if use_custom_refinement:
+        # Global refinement: swap points between layers to improve overall regularity
+        if len(selected_layers) > 1:
+            print("ℹ Global refinement across layers...")
+            selected_layers, free_idx = refine_layers_global(
+                GRID_POINTS, selected_layers, free_idx, rng,
+                steps=3500, candidate_pool=140, cross_weight=0.35,
+                penalty_weight=0.15, min_per=2
+            )
+            # Recompute selected_all
+            selected_all = np.concatenate(selected_layers) if selected_layers else np.array([], dtype=int)
+            print("✓ Global refinement done")
+
+        # Targeted refinement for the last layer (improve its regularity)
+        if len(selected_layers) > 0:
+            print("ℹ Targeted refinement for last layer...")
+            selected_layers, free_idx = refine_last_layer(
+                GRID_POINTS, selected_layers, free_idx, rng,
+                steps=3500, candidate_pool=160, preserve_other=0.92
+            )
+            selected_all = np.concatenate(selected_layers) if selected_layers else np.array([], dtype=int)
+            print("✓ Last layer refinement done")
 
     # Soft row/col constraint handled via penalty in scoring (no hard enforcement)
 
@@ -880,14 +1012,22 @@ def main():
                 layer_name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
                 layer_points = GRID_POINTS[layer]
                 layer_tri = mtri.Triangulation(layer_points[:, 0], layer_points[:, 1])
-
+                # Draw only interior edges (shared by two triangles)
+                edge_counts = {}
                 for tri_idx in layer_tri.triangles:
-                    triangle = layer_points[tri_idx]
-                    triangle_closed = np.vstack([triangle, triangle[0]])
-                    ax.plot(triangle_closed[:, 0], triangle_closed[:, 1],
-                            color=color, linewidth=0.2, alpha=0.4)
+                    a, b, c = tri_idx
+                    edges = [(a, b), (b, c), (c, a)]
+                    for u, v in edges:
+                        e = tuple(sorted((u, v)))
+                        edge_counts[e] = edge_counts.get(e, 0) + 1
+                for (u, v), count in edge_counts.items():
+                    if count == 2:
+                        p1 = layer_points[u]
+                        p2 = layer_points[v]
+                        ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
+                                color="gray", linewidth=0.6, alpha=0.6)
 
-                ax.plot([], [], color=color, linewidth=0.9, label=f"{layer_name} Delaunay")
+                ax.plot([], [], color="gray", linewidth=1.2, label=f"{layer_name} Delaunay")
 
         if show_mst:
             for i, j in mst_edges:

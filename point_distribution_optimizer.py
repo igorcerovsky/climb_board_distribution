@@ -45,10 +45,14 @@ class PointDistributionOptimizer:
         self.total_points = sum(len(layer) for layer in self.layers)
         self.initial_point_counts = [len(layer) for layer in self.layers]
         # Min size: can lose up to tolerance fraction, max size: can gain up to tolerance fraction
-        self.min_point_counts = [int(count * (1 - point_variance_tolerance)) 
-                                for count in self.initial_point_counts]
-        self.max_point_counts = [int(count * (1 + point_variance_tolerance)) 
-                                for count in self.initial_point_counts]
+        self.min_point_counts = [
+            (max(1, int(count * (1 - point_variance_tolerance))) if count > 0 else 0)
+            for count in self.initial_point_counts
+        ]
+        self.max_point_counts = [
+            (max(1, int(count * (1 + point_variance_tolerance))) if count > 0 else 0)
+            for count in self.initial_point_counts
+        ]
         
         self.iteration_history = []
     
@@ -68,8 +72,16 @@ class PointDistributionOptimizer:
         for iteration in range(self.max_iterations):
             # Compute metrics for all layers
             metrics_list = []
+            # Expected spacing per layer based on area/points (size-aware)
+            all_points = self.grid_points
+            x_min, x_max = all_points[:, 0].min(), all_points[:, 0].max()
+            y_min, y_max = all_points[:, 1].min(), all_points[:, 1].max()
+            area = (x_max - x_min) * (y_max - y_min)
+
             for layer_idx, layer in enumerate(self.layers):
-                metrics = compute_layer_metrics(layer, self.grid_points)
+                n = len(layer)
+                expected_spacing = np.sqrt(area / max(n, 1)) if n > 0 else None
+                metrics = compute_layer_metrics(layer, self.grid_points, expected_spacing=expected_spacing)
                 metrics_list.append(metrics)
             
             # Global regularity score (mean of per-layer regularity)
@@ -158,20 +170,45 @@ class PointDistributionOptimizer:
                               key=lambda i: metrics_list[i]["regularity_score"])
         
         # Find point to move
-        point_to_move = find_point_to_swap(worst_layer_idx, target_layer_idx, 
-                                          None, self.grid_points, self.layers)
-        
+        point_to_move = find_point_to_swap(
+            worst_layer_idx, target_layer_idx, 
+            None, self.grid_points, self.layers
+        )
+
         if point_to_move is None:
             return False
-        
+
+        # If sizes are fixed (min == max), do a swap to keep counts stable
+        if self.min_point_counts[worst_layer_idx] == self.max_point_counts[worst_layer_idx] and \
+           self.min_point_counts[target_layer_idx] == self.max_point_counts[target_layer_idx]:
+            point_to_return = find_point_to_swap(
+                target_layer_idx, worst_layer_idx,
+                None, self.grid_points, self.layers
+            )
+            if point_to_return is None:
+                return False
+            # Perform swap
+            self.layers[worst_layer_idx] = np.setdiff1d(
+                self.layers[worst_layer_idx], [point_to_move], assume_unique=False
+            )
+            self.layers[worst_layer_idx] = np.concatenate([
+                self.layers[worst_layer_idx], [point_to_return]
+            ])
+            self.layers[target_layer_idx] = np.setdiff1d(
+                self.layers[target_layer_idx], [point_to_return], assume_unique=False
+            )
+            self.layers[target_layer_idx] = np.concatenate([
+                self.layers[target_layer_idx], [point_to_move]
+            ])
+            return True
+
         # Check size constraints - enforce strict min/max bounds
         if len(self.layers[worst_layer_idx]) <= self.min_point_counts[worst_layer_idx]:
             return False
-        
         if len(self.layers[target_layer_idx]) >= self.max_point_counts[target_layer_idx]:
             return False
-        
-        # Perform swap
+
+        # Perform move
         self.layers[worst_layer_idx] = np.setdiff1d(
             self.layers[worst_layer_idx], [point_to_move], assume_unique=False
         )

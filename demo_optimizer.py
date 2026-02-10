@@ -16,7 +16,7 @@ import argparse
 from pathlib import Path
 
 # Import from existing modules
-from sample_grid import load_config, GRID_POINTS, sample_additional, optimize_rotations
+from sample_grid import load_config, GRID_POINTS, sample_layer_best, optimize_rotations
 from point_distribution_optimizer import optimize_point_distribution
 from utils import build_neighbors_from_tri, compute_layer_metrics
 
@@ -53,10 +53,9 @@ def run_optimization_pipeline(config_file=None):
         if layer_i >= len(N_list):
             break
         n = N_list[layer_i]
-        respect_existing = (layer_i == 0)
-        new_sel = sample_additional(
-            GRID_POINTS, free_idx, selected_all, n, rng,
-            respect_existing=respect_existing, top_k=8
+        new_sel = sample_layer_best(
+            GRID_POINTS, free_idx, n, rng,
+            trials=8, top_k=10, swap_steps=250, use_poisson=False, use_pam=True
         )
         selected_layers.append(new_sel)
         if new_sel.size > 0:

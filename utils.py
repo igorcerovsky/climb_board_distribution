@@ -46,7 +46,7 @@ def euclidean_mst(points):
     return edges
 
 
-def compute_layer_metrics(layer_indices, all_points):
+def compute_layer_metrics(layer_indices, all_points, expected_spacing=None):
     """
     Compute distribution metrics for a layer.
     
@@ -98,6 +98,10 @@ def compute_layer_metrics(layer_indices, all_points):
         # Regularity: coefficient of variation of neighbor distances (lower is more regular)
         std_dist = neighbor_dists.std()
         regularity_score = std_dist / avg_dist if avg_dist > 0 else 0
+        # Size-normalized regularity (optional): compare to expected spacing
+        if expected_spacing is not None and expected_spacing > 0:
+            normalized = neighbor_dists / expected_spacing
+            regularity_score = normalized.std() / normalized.mean() if normalized.mean() > 0 else regularity_score
     else:
         avg_dist = min_dist = max_dist = regularity_score = np.nan
     
