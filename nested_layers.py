@@ -33,6 +33,7 @@ def load_config(config_file=None):
                 "name": "Jug",
                 "color": "red",
                 "draw_triang": True,
+                "rot_limits": [0, 350],
                 "sublayers": [
                     {"name": "Jug-A", "N": 22, "color": "red", "marker": "o", "draw_triang": True},
                     {"name": "Jug-B", "N": 22, "color": "darkred", "marker": "x", "draw_triang": True}
@@ -42,6 +43,7 @@ def load_config(config_file=None):
                 "name": "Pinch",
                 "color": "blue",
                 "draw_triang": True,
+                "rot_limits": [45, 135],
                 "sublayers": [
                     {"name": "Pinch-A", "N": 24, "color": "blue", "marker": "o", "draw_triang": True},
                     {"name": "Pinch-B", "N": 24, "color": "navy", "marker": "x", "draw_triang": True}
@@ -51,6 +53,7 @@ def load_config(config_file=None):
                 "name": "Sloper (flat)",
                 "color": "purple",
                 "draw_triang": True,
+                "rot_limits": [50, 120],
                 "sublayers": [
                     {"name": "Sloper-A", "N": 22, "color": "purple", "marker": "o", "draw_triang": True},
                     {"name": "Sloper-B", "N": 22, "color": "mediumorchid", "marker": "x", "draw_triang": True}
@@ -60,6 +63,7 @@ def load_config(config_file=None):
                 "name": "Volume",
                 "color": "indigo",
                 "draw_triang": True,
+                "rot_limits": [20, 160],
                 "sublayers": [
                     {"name": "Volume-A", "N": 22, "color": "indigo", "marker": "o", "draw_triang": True},
                     {"name": "Volume-B", "N": 22, "color": "slateblue", "marker": "s", "draw_triang": True}
@@ -69,6 +73,7 @@ def load_config(config_file=None):
                 "name": "Edge",
                 "color": "green",
                 "draw_triang": True,
+                "rot_limits": [20, 160],
                 "sublayers": [
                     {"name": "Edge-A", "N": 22, "color": "green", "marker": "o", "draw_triang": True},
                     {"name": "Edge-B", "N": 22, "color": "seagreen", "marker": "x", "draw_triang": True}
@@ -78,6 +83,7 @@ def load_config(config_file=None):
                 "name": "Hold",
                 "color": "magenta",
                 "draw_triang": True,
+                "rot_limits": [20, 160],
                 "sublayers": [
                     {"name": "Hold-A", "N": 24, "color": "magenta", "marker": "o", "draw_triang": True},
                     {"name": "Hold-B", "N": 24, "color": "deeppink", "marker": "x", "draw_triang": True}
