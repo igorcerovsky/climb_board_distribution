@@ -18,12 +18,11 @@ def load_config(config_file=None):
             {"name": "Jug", "N": 44, "draw_triang": False, "color": "red", "rot_limits": [0, 350], "visible": True},
             {"name": "Pinch", "N": 24, "draw_triang": False, "color": "blue", "rot_limits": [45, 135], "visible": True},
             {"name": "PinchBig", "N": 24, "draw_triang": False, "color": "orange", "rot_limits": [45, 135], "visible": True},
+            {"name": "Sloper (round)", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [50, 120], "visible": True},
             {"name": "Sloper (flat)", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [50, 120], "visible": True},
             {"name": "Volume", "N": 44, "draw_triang": False, "color": "indigo", "rot_limits": [20, 160], "visible": True},
-            {"name": "Edge", "N": 22, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
-            {"name": "EdgeBig", "N": 22, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
-            {"name": "Hold", "N": 24, "draw_triang": False, "color": "magenta", "rot_limits": [20, 160], "visible": True},
-            {"name": "Last", "N": 24, "draw_triang": False, "color": "yellow", "rot_limits": [20, 160], "visible": True},
+            {"name": "Edge", "N": 44, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
+            {"name": "Hold", "N": 48, "draw_triang": False, "color": "magenta", "rot_limits": [20, 160], "visible": True},
         ]
     }
     
@@ -1012,6 +1011,7 @@ def main():
                 layer_name = layer_names[i] if i < len(layer_names) else f"Layer {i+1}"
                 layer_points = GRID_POINTS[layer]
                 layer_tri = mtri.Triangulation(layer_points[:, 0], layer_points[:, 1])
+
                 # Draw only interior edges (shared by two triangles)
                 edge_counts = {}
                 for tri_idx in layer_tri.triangles:
@@ -1025,9 +1025,9 @@ def main():
                         p1 = layer_points[u]
                         p2 = layer_points[v]
                         ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
-                                color="gray", linewidth=0.6, alpha=0.6)
+                                color=color, linewidth=1.2, alpha=0.6)
 
-                ax.plot([], [], color="gray", linewidth=1.2, label=f"{layer_name} Delaunay")
+                ax.plot([], [], color=color, linewidth=1.8, label=f"{layer_name} Delaunay")
 
         if show_mst:
             for i, j in mst_edges:
