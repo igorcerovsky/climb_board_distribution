@@ -18,7 +18,7 @@ def load_config(config_file=None):
     defaults = {
         "layers": [
             {"name": "Jug", "N": 44, "draw_triang": False, "color": "red", "rot_limits": [0, 350], "visible": True},
-            {"name": "PinchBig", "N": 44, "draw_triang": False, "color": "orange", "rot_limits": [45, 135], "visible": True},
+            {"name": "Pinch", "N": 44, "draw_triang": False, "color": "orange", "rot_limits": [45, 135], "visible": True},
             {"name": "Sloper", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [50, 120], "visible": True},
             {"name": "Volume", "N": 44, "draw_triang": False, "color": "indigo", "rot_limits": [20, 160], "visible": True},
             {"name": "Edge", "N": 44, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
@@ -282,8 +282,7 @@ def main():
             "max_iterations": 25,
             "point_variance_tolerance": 0.0,
             "improvement_threshold": 0.001,
-            "patience": 5
-        }
+            "patience": 5        }
     )
     use_custom_refinement = config.get("use_custom_refinement", False)
     

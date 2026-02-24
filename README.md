@@ -1,6 +1,6 @@
 # Climb Board Distribution
 
-This repository contains a Python script for distributing points on a grid with farthest-point sampling, layered point sets, rotation assignment optimized over Delaunay neighbors, and visualization of the resulting graph.
+This repository contains a Python script for distributing points on a grid using Mitchell's Best-Candidate Sampling, layered point sets, rotation assignment optimized over Delaunay neighbors, and visualization of the resulting graph.
 
 ## Quick Start
 
