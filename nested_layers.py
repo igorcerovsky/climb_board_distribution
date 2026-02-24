@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 
 from utils import build_neighbors_from_tri
+from point_distribution_optimizer import optimize_point_distribution
 
 
 def load_config(config_file=None):
@@ -231,8 +232,18 @@ def main():
 
     config = load_config(args.config)
     rng = np.random.default_rng(42)
+    top_layer_optimizer_cfg = config.get(
+        "top_layer_optimizer",
+        {
+            "max_iterations": 20,
+            "point_variance_tolerance": 0.0,
+            "improvement_threshold": 0.001,
+            "patience": 5
+        }
+    )
 
-    points, _, _ = build_grid(config["grid"])
+    points, num_x, num_y = build_grid(config["grid"])
+    print(f"Grid size: {num_x} x {num_y} = {len(points)} points")
     free_idx = np.arange(len(points))
 
     layers_cfg = config["layers"]
@@ -244,13 +255,28 @@ def main():
         n = sum(int(sub.get("N", 0)) for sub in layer_cfg.get("sublayers", []))
         layer_sizes.append(n)
 
-    top_layer_indices = []
-    for li, n in enumerate(layer_sizes):
+    # Size-aware order avoids starving smaller layers.
+    layer_order = sorted(
+        range(len(layer_sizes)),
+        key=lambda i: (layer_sizes[i], float(rng.random()))
+    )
+    top_layer_indices = [np.array([], dtype=int) for _ in layer_sizes]
+    for li in layer_order:
+        n = layer_sizes[li]
         sel = greedy_farthest(points, free_idx, n, rng, top_k=8)
         sel = local_swap_improve(points, sel, free_idx, rng, steps=300)
         if sel.size > 0:
             free_idx = np.setdiff1d(free_idx, sel, assume_unique=False)
-        top_layer_indices.append(sel)
+        top_layer_indices[li] = sel
+
+    # Inter-layer balancing: optimize top-level layer distribution before sublayer split.
+    if len(top_layer_indices) > 1:
+        print("Optimizing top-layer distribution...")
+        top_layer_indices = optimize_point_distribution(
+            points, top_layer_indices, **top_layer_optimizer_cfg
+        )
+        used = np.concatenate(top_layer_indices) if top_layer_indices else np.array([], dtype=int)
+        free_idx = np.setdiff1d(np.arange(len(points)), used, assume_unique=False)
 
     # 2) Split each top-level layer into sublayers, optimized within that layer
     for layer_cfg, layer_sel in zip(layers_cfg, top_layer_indices):
@@ -290,6 +316,18 @@ def main():
                 all_idx.append(sub["indices"])
         if all_idx:
             layer["indices"] = np.concatenate(all_idx)
+
+    # Validate rotation configuration and surface missing limits explicitly.
+    missing_rotation_limits = []
+    for layer in layers:
+        for sub in layer["sublayers"]:
+            if sub.get("rot_limits") is None and layer.get("rot_limits") is None:
+                missing_rotation_limits.append(f"{layer['name']}/{sub['name']}")
+    if missing_rotation_limits:
+        print(
+            "⚠ Rotations disabled (missing rot_limits) for: " +
+            ", ".join(missing_rotation_limits)
+        )
 
     # Compute rotations per sublayer (inherit from parent if not set)
     for layer in layers:

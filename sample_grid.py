@@ -1,14 +1,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-import tty
-import termios
-import select
 import json
 import argparse
 import sys
 from pathlib import Path
 from point_distribution_optimizer import optimize_point_distribution
+
+try:
+    import matplotlib.tri as mtri
+except ImportError:
+    mtri = None
 
 # --- Configuration Loading ---
 def load_config(config_file=None):
@@ -16,10 +18,8 @@ def load_config(config_file=None):
     defaults = {
         "layers": [
             {"name": "Jug", "N": 44, "draw_triang": False, "color": "red", "rot_limits": [0, 350], "visible": True},
-            {"name": "Pinch", "N": 24, "draw_triang": False, "color": "blue", "rot_limits": [45, 135], "visible": True},
-            {"name": "PinchBig", "N": 24, "draw_triang": False, "color": "orange", "rot_limits": [45, 135], "visible": True},
-            {"name": "Sloper (round)", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [50, 120], "visible": True},
-            {"name": "Sloper (flat)", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [50, 120], "visible": True},
+            {"name": "PinchBig", "N": 44, "draw_triang": False, "color": "orange", "rot_limits": [45, 135], "visible": True},
+            {"name": "Sloper", "N": 44, "draw_triang": False, "color": "purple", "rot_limits": [50, 120], "visible": True},
             {"name": "Volume", "N": 44, "draw_triang": False, "color": "indigo", "rot_limits": [20, 160], "visible": True},
             {"name": "Edge", "N": 44, "draw_triang": False, "color": "green", "rot_limits": [20, 160], "visible": True},
             {"name": "Hold", "N": 48, "draw_triang": False, "color": "magenta", "rot_limits": [20, 160], "visible": True},
@@ -45,7 +45,6 @@ mpl.rcParams['keymap.quit'] = []
 
 
 # --- 1. Generate Original Grid Points ---
-np.random.seed(1)
 
 # Global grid points (precomputed)
 LEN_X_MM = 3400
@@ -752,6 +751,9 @@ def main():
     )
     use_custom_refinement = config.get("use_custom_refinement", False)
     
+    # Print grid size summary
+    print(f"Grid size: {NUM_POINTS_X} x {NUM_POINTS_Y} = {len(GRID_POINTS)} points")
+
     # Adjust layer counts to fill the grid evenly (approximately)
     total_points = len(GRID_POINTS)
     target_sum = total_points
@@ -871,11 +873,6 @@ def main():
     selected_points = GRID_POINTS[selected_all]
     rot_map = np.full(len(GRID_POINTS), np.nan)
     
-    try:
-        import matplotlib.tri as mtri
-    except ImportError:
-        mtri = None
-    
     for layer_i, layer in enumerate(selected_layers):
         if layer.size == 0:
             continue
@@ -890,7 +887,9 @@ def main():
             try:
                 layer_tri = mtri.Triangulation(layer_points[:, 0], layer_points[:, 1])
                 layer_neighbors = build_neighbors_from_tri(layer_tri, len(layer))
-            except:
+            except (ValueError, RuntimeError, FloatingPointError) as err:
+                # Keep fallback behavior but surface expected triangulation failures.
+                print(f"⚠ Triangulation failed for layer {layer_i + 1}: {err}")
                 layer_neighbors = [set() for _ in range(len(layer))]
         else:
             layer_neighbors = [set() for _ in range(len(layer))]
@@ -1043,33 +1042,15 @@ def main():
         fig.tight_layout(rect=[0, 0, 0.82, 1])
         fig.canvas.draw_idle()
 
-    def getch_nonblocking(timeout=0.1):
-        """Read a single keypress from terminal without Enter. Returns None if no key."""
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-            rlist, _, _ = select.select([sys.stdin], [], [], timeout)
-            if rlist:
-                ch = sys.stdin.read(1)
-                return ch
-            return None
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    render()
-    plt.show(block=False)
-
-    while plt.fignum_exists(fig.number):
-        key = getch_nonblocking(0.1)
-        if not key:
-            plt.pause(0.01)
-            continue
-        key = key.lower()
-        if key == "x":
+    def on_key_press(event):
+        if not event.key:
+            return
+        key = event.key.lower()
+        if key == "escape" or key == "x":
             print("✓ Exiting.")
             plt.close(fig)
-            break
+            return
+            
         if key in symbol_keys:
             layer_idx = symbol_keys[key]
             if layer_idx < len(selected_layers):
@@ -1077,14 +1058,19 @@ def main():
                 status = "shown" if show_symbols[layer_idx] else "hidden"
                 print(f"✓ Layer {layer_idx + 1} symbols {status}")
             render()
-            continue
+            return
+            
         if key.isdigit():
             layer_idx = int(key) - 1
             if 0 <= layer_idx < len(selected_layers):
                 draw_triang[layer_idx] = not draw_triang[layer_idx]
                 print(f"✓ Toggled triangulation for layer {key}")
                 render()
-            continue
+            return
+
+    fig.canvas.mpl_connect('key_press_event', on_key_press)
+    render()
+    plt.show()
 
 if __name__ == "__main__":
     main()

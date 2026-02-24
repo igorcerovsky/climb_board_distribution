@@ -67,7 +67,8 @@ class PointDistributionOptimizer:
         print()
         
         no_improvement_count = 0
-        best_global_regularity = float('inf')
+        best_overall_score = float('inf')
+        best_layers = [np.array(layer, dtype=int).copy() for layer in self.layers]
         
         for iteration in range(self.max_iterations):
             # Compute metrics for all layers
@@ -110,8 +111,9 @@ class PointDistributionOptimizer:
                   f"Sizes={[len(l) for l in self.layers]}")
             
             # Check improvement
-            if overall_score < best_global_regularity - self.improvement_threshold:
-                best_global_regularity = overall_score
+            if overall_score < best_overall_score - self.improvement_threshold:
+                best_overall_score = overall_score
+                best_layers = [np.array(layer, dtype=int).copy() for layer in self.layers]
                 no_improvement_count = 0
             else:
                 no_improvement_count += 1
@@ -134,11 +136,17 @@ class PointDistributionOptimizer:
             else:
                 print(f"  → Swapped point from layer {worst_layer_idx}")
         
+        # Restore the best state observed during optimization.
+        self.layers = [np.array(layer, dtype=int).copy() for layer in best_layers]
+
         print("\n" + "="*60)
         print("OPTIMIZATION COMPLETE")
         print("="*60)
         print(f"Final configuration: {[len(l) for l in self.layers]} points per layer")
-        print(f"Final overall score: {self.iteration_history[-1]['overall_score']:.4f}")
+        if best_overall_score < float('inf'):
+            print(f"Final overall score: {best_overall_score:.4f}")
+        elif self.iteration_history:
+            print(f"Final overall score: {self.iteration_history[-1]['overall_score']:.4f}")
         print()
         
         return self.layers
@@ -148,9 +156,15 @@ class PointDistributionOptimizer:
         worst_metrics = metrics_list[worst_layer_idx]
         worst_regularity = worst_metrics["regularity_score"]
         
-        # Only attempt swap if the problem is significant (above threshold)
-        # or if the layer will drop below minimum size easily
-        if len(self.layers[worst_layer_idx]) <= self.min_point_counts[worst_layer_idx] + 1:
+        # For variable-size mode, avoid draining the source layer too close to min.
+        # In fixed-size mode (min==max), allow swap logic below to run.
+        fixed_size_worst = (
+            self.min_point_counts[worst_layer_idx] ==
+            self.max_point_counts[worst_layer_idx]
+        )
+        if (not fixed_size_worst) and (
+            len(self.layers[worst_layer_idx]) <= self.min_point_counts[worst_layer_idx] + 1
+        ):
             return False
         
         # Find candidate layers to swap points FROM/TO
